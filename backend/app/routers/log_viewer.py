@@ -8,7 +8,9 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
 from app.schemas import ActionPayload, ActionResult, EntryPayload, PageResult
+from app.services import dependency
 from app.services.log_viewer import LogViewerService
+from app.store import store
 
 router = APIRouter(prefix="/api/log_viewer", tags=["采集日志"])
 
@@ -39,6 +41,57 @@ def list_entries(
     items, total = service.list_entries(
         filters=query_filters(request), keyword=keyword, status=status, page=page, size=size)
     return PageResult(items=items, total=total, page=page, size=size)
+
+
+@router.get("/dependency-waiting", response_model=dict)
+def dependency_waiting(plan_id: int | None = Query(default=None)) -> dict:
+    """日志页读取依赖等待清单，用于补关联任务日志与打开依赖回执。"""
+    return {"items": service.waiting_items(plan_id)}
+
+
+@router.get("/run-plans", response_model=dict)
+def run_plans(plan_id: int | None = Query(default=None)) -> dict:
+    """日志页读取调度运行计划，作为核对状态的对照。"""
+    for plan in store.rows("schedule"):
+        dependency.ensure_plan(plan)
+    items = dependency.all_run_plans()
+    if plan_id is not None:
+        items = [item for item in items if int(item.get("plan_id", 0)) == plan_id]
+    return {"items": items}
+
+
+@router.get("/verify", response_model=dict)
+def verify(plan_id: int | None = Query(default=None)) -> dict:
+    """读取运行计划及等待清单并返回核对状态，不改动任何数据。"""
+    return service.verify(plan_id=plan_id)
+
+
+@router.post("/sync-waiting-logs", response_model=ActionResult)
+def sync_waiting_logs(payload: dict[str, object] | None = None) -> ActionResult:
+    """为延迟依赖记录关联任务日志；同一对象只执行一次，余下拒绝。"""
+    plan_id = None
+    if payload and payload.get("plan_id") is not None:
+        plan_id = int(payload["plan_id"])
+    outcome = service.sync_waiting_logs(plan_id)
+    message = f"已补 {len(outcome['created'])} 条关联任务日志，跳过 {len(outcome['skipped'])} 条"
+    return ActionResult(ok=True, message=message, entry=outcome)
+
+
+@router.get("/workbench", response_model=dict)
+def workbench() -> dict:
+    """待审核工作台项：由运行计划与等待清单同步消费生成。"""
+    return {"items": service.workbench()}
+
+
+@router.post("/sync-workbench", response_model=ActionResult)
+def sync_workbench(payload: dict[str, object] | None = None) -> ActionResult:
+    """同步消费运行计划及等待清单，生成待审核工作台项；同一对象只生成一次。"""
+    plan_id = None
+    if payload and payload.get("plan_id") is not None:
+        plan_id = int(payload["plan_id"])
+    outcome = service.sync_workbench(plan_id)
+    message = f"已生成 {len(outcome['created'])} 条待审核工作台项，跳过 {len(outcome['skipped'])} 条"
+    return ActionResult(ok=True, message=message, entry=outcome)
 
 
 @router.get("/export")

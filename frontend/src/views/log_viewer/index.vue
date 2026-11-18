@@ -56,6 +56,75 @@
       </tbody>
     </table>
 
+    <section class="dependency-panel" data-testid="log-dependency-panel">
+      <header class="panel-head">
+        <h3>依赖等待清单 · 日志侧核对</h3>
+        <div class="page-actions">
+          <button class="btn" type="button" data-testid="sync-waiting-logs" @click="syncWaitingLogs">为延迟依赖补日志</button>
+          <button class="btn" type="button" data-testid="sync-workbench" @click="syncWorkbench">生成待审核工作台项</button>
+          <button class="btn" type="button" data-testid="refresh-verify" @click="loadDependency">刷新核对</button>
+        </div>
+      </header>
+      <div class="stat-row">
+        <article v-for="item in verifySummary" :key="item.label" class="stat-card">
+          <span class="stat-label">{{ item.label }}</span>
+          <strong class="stat-value">{{ item.value }}</strong>
+        </article>
+      </div>
+      <p v-if="panelMessage" class="panel-message" data-testid="log-panel-message">{{ panelMessage }}</p>
+      <ul class="snapshot-list">
+        <li v-for="item in waitingItems" :key="`${item.plan_id}-${item.快照版本}`" class="snapshot-row" data-testid="log-waiting-row">
+          <strong>{{ item.计划编号 }} · {{ item.阶段 }}</strong>
+          <span>依赖任务：{{ item.依赖任务 }}（{{ item.依赖完成状态 }}）</span>
+          <span>等待原因：{{ item.等待原因 }}</span>
+          <span>
+            关联任务日志：
+            <button v-if="item.关联任务日志编号" class="link" type="button" @click="fillKeyword(item.关联任务日志编号)">
+              LOG #{{ item.关联任务日志编号 }}
+            </button>
+            <template v-else>未记录</template>
+          </span>
+          <span>
+            依赖回执：
+            <button v-if="item.依赖回执编号" class="link" type="button" :data-testid="`open-receipt-${item.依赖回执编号}`" @click="openReceipt(item.依赖回执编号)">
+              #{{ item.依赖回执编号 }}
+            </button>
+            <template v-else>未回执</template>
+          </span>
+        </li>
+        <li v-if="!waitingItems.length" class="empty-state">等待清单为空，所有依赖已完成</li>
+      </ul>
+
+      <header class="panel-head"><h4>运行计划核对状态</h4></header>
+      <ul class="snapshot-list">
+        <li v-for="item in verifyItems" :key="`${item.plan_id}-${item.快照版本}-verify`" class="snapshot-row" data-testid="verify-row">
+          <strong>{{ item.计划编号 }} · v{{ item.快照版本 }} · {{ item.核对状态 }}</strong>
+          <span>计划状态：{{ item.计划状态 }} / {{ item.阶段 }}</span>
+          <span>依赖完成状态：{{ item.依赖完成状态 }}</span>
+          <span>核对说明：{{ item.核对说明 }}</span>
+        </li>
+        <li v-if="!verifyItems.length" class="empty-state">暂无运行计划可核对</li>
+      </ul>
+
+      <div v-if="receiptDetail" class="receipt-box" data-testid="log-receipt-detail">
+        <h4>依赖回执 #{{ receiptDetail.receipt.id }}</h4>
+        <p>任务 {{ receiptDetail.receipt.任务编号 }} · {{ receiptDetail.receipt.完成状态 }} · 分区 {{ receiptDetail.receipt.依赖分区 }}</p>
+        <p class="panel-message">{{ receiptDetail.receipt.回执说明 || '无回执说明' }}</p>
+        <button class="btn ghost" type="button" data-testid="close-log-receipt" @click="receiptDetail = null">关闭回执</button>
+      </div>
+
+      <header class="panel-head"><h4>待审核工作台项</h4></header>
+      <ul class="snapshot-list">
+        <li v-for="item in workbenchItems" :key="String(item.id)" class="snapshot-row" data-testid="workbench-row">
+          <strong>{{ item.计划编号 }} · {{ item.审核状态 }}</strong>
+          <span>依赖任务：{{ item.依赖任务 }}（{{ item.依赖完成状态 }}）</span>
+          <span>等待原因：{{ item.等待原因 }}</span>
+          <span>关联任务日志：{{ item.关联任务日志编号 || '未记录' }}</span>
+        </li>
+        <li v-if="!workbenchItems.length" class="empty-state">暂无待审核工作台项，可先同步生成</li>
+      </ul>
+    </section>
+
     <div v-if="showCreate" class="modal-backdrop" data-testid="create-modal">
       <form class="modal" @submit.prevent="submitCreate">
         <h3>登记日志条目</h3>
@@ -85,6 +154,27 @@ import { computed, onMounted, ref } from 'vue'
 import { request } from '@/api/client'
 
 type Row = Record<string, string | number | null>
+type WaitingItem = {
+  计划编号: string
+  阶段: string
+  依赖任务: string
+  依赖完成状态: string
+  等待原因: string
+  plan_id: number
+  快照版本: number
+  依赖回执编号: number | null
+  关联任务日志编号: string | null
+}
+type VerifyItem = {
+  计划编号: string
+  plan_id: number
+  快照版本: number
+  计划状态: string
+  阶段: string
+  依赖完成状态: string
+  核对状态: string
+  核对说明: string
+}
 
 const ENDPOINT = '/api/log_viewer'
 const columns = ["日志编号", "关联任务", "日志级别", "记录时间", "日志内容", "错误堆栈", "处理状态", "处理人"]
@@ -100,6 +190,12 @@ const filterFields = columns.slice(0, 3)
 const showCreate = ref(false)
 const creating = ref(false)
 const createValues = ref<Record<string, string>>({})
+const waitingItems = ref<WaitingItem[]>([])
+const verifyItems = ref<VerifyItem[]>([])
+const workbenchItems = ref<Row[]>([])
+const verifySummary = ref<{ label: string; value: number }[]>([])
+const panelMessage = ref('')
+const receiptDetail = ref<{ receipt: Row; logs: Row[] } | null>(null)
 const stats = computed(() => [
   { label: metricNames[0], value: total.value },
   { label: metricNames[1], value: rows.value.filter((row) => row.status === statuses[1]).length },
@@ -179,10 +275,78 @@ async function reload() {
     const payload = await response.json()
     rows.value = payload.items ?? []
     total.value = payload.total ?? rows.value.length
+    await loadDependency()
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '采集日志列表读取失败'
   }
 }
 
-onMounted(reload)
+async function loadDependency() {
+  try {
+    const [waitingResponse, verifyResponse, workbenchResponse] = await Promise.all([
+      request(`${ENDPOINT}/dependency-waiting`),
+      request(`${ENDPOINT}/verify`),
+      request(`${ENDPOINT}/workbench`),
+    ])
+    if (waitingResponse.ok) waitingItems.value = (await waitingResponse.json()).items ?? []
+    if (verifyResponse.ok) {
+      const payload = await verifyResponse.json()
+      verifyItems.value = payload.items ?? []
+      const summary = payload.summary ?? {}
+      verifySummary.value = [
+        { label: '运行计划', value: summary['运行计划'] ?? 0 },
+        { label: '等待清单', value: summary['等待清单'] ?? 0 },
+        { label: '核对一致', value: summary['一致'] ?? 0 },
+        { label: '待核对', value: summary['待核对'] ?? 0 },
+        { label: '缺日志', value: summary['缺日志'] ?? 0 },
+        { label: '冲突', value: summary['冲突'] ?? 0 },
+        { label: '未排期', value: summary['未排期'] ?? 0 },
+      ]
+    }
+    if (workbenchResponse.ok) workbenchItems.value = (await workbenchResponse.json()).items ?? []
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '依赖等待清单读取失败'
+  }
+}
+
+async function syncWaitingLogs() {
+  await postDependency(`${ENDPOINT}/sync-waiting-logs`, {})
+}
+
+async function syncWorkbench() {
+  await postDependency(`${ENDPOINT}/sync-workbench`, {})
+}
+
+async function postDependency(url: string, body: unknown) {
+  panelMessage.value = ''
+  try {
+    const response = await request(url, { method: 'POST', body: JSON.stringify(body) })
+    const payload = await response.json()
+    panelMessage.value = payload.message || ''
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '操作失败'
+  }
+  await reload()
+}
+
+function fillKeyword(logId: string) {
+  filters.value['日志编号'] = logId
+  void reload()
+}
+
+async function openReceipt(receiptId: number) {
+  try {
+    const response = await request(`/api/schedule/receipts/${receiptId}`)
+    if (!response.ok) throw new Error('依赖回执读取失败')
+    receiptDetail.value = await response.json()
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '依赖回执读取失败'
+  }
+}
+
+onMounted(() => {
+  const keyword = new URLSearchParams(window.location.search).get('keyword')
+  if (keyword) filters.value['日志编号'] = keyword
+  void reload()
+})
 </script>

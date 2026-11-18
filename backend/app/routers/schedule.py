@@ -41,6 +41,42 @@ def list_entries(
     return PageResult(items=items, total=total, page=page, size=size)
 
 
+@router.get("/run-plans", response_model=dict)
+def list_run_plans(
+    include_history: bool = Query(default=False, description="是否包含历史快照版本"),
+    plan_id: int | None = Query(default=None),
+) -> dict:
+    """调度运行计划：默认只给每个计划的最新快照，include_history=true 时保留全部版本。"""
+    return {"items": service.run_plans(include_history=include_history, plan_id=plan_id)}
+
+
+@router.get("/waiting-list", response_model=dict)
+def waiting_list(plan_id: int | None = Query(default=None)) -> dict:
+    """依赖等待清单：只包含依赖未完成、且停在等待/暂运行阶段的计划。"""
+    return {"items": service.waiting_list(plan_id=plan_id)}
+
+
+@router.get("/receipts", response_model=dict)
+def list_receipts(task_code: str | None = Query(default=None)) -> dict:
+    """依赖任务回执列表；日志页可据此打开对应依赖回执。"""
+    return {"items": service.receipts(task_code=task_code)}
+
+
+@router.get("/batches", response_model=dict)
+def list_batches(plan_id: int | None = Query(default=None)) -> dict:
+    """已产出运行批次；同一计划同一分区幂等键唯一。"""
+    return {"items": service.batches(plan_id=plan_id)}
+
+
+@router.get("/receipts/{receipt_id}", response_model=dict)
+def receipt_detail(receipt_id: int) -> dict:
+    """依赖回执明细，附带该依赖任务名下的采集日志。"""
+    detail = service.receipt_detail(receipt_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail=f"依赖回执 {receipt_id} 不存在")
+    return detail
+
+
 @router.get("/export")
 def export_entries(
     request: Request,
@@ -90,3 +126,75 @@ def run_action(entry_id: int, payload: ActionPayload) -> ActionResult:
     if entry is None:
         return ActionResult(ok=False, message=message)
     return ActionResult(ok=True, message=message, entry=entry)
+
+
+@router.get("/{entry_id}/dependency", response_model=dict)
+def dependency_status(entry_id: int) -> dict:
+    """调度页读取依赖完成情况、计划状态与等待原因。"""
+    detail = service.dependency_status(entry_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail=f"调度计划 {entry_id} 不存在或已归档")
+    return detail
+
+
+@router.get("/{entry_id}/compare", response_model=dict)
+def compare_options(entry_id: int) -> dict:
+    """比较「停在已排期」与「进入暂运行」两个状态边界，只读不写。"""
+    detail = service.compare_options(entry_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail=f"调度计划 {entry_id} 不存在或已归档")
+    return detail
+
+
+@router.post("/{entry_id}/recalculate", response_model=ActionResult)
+def recalculate(entry_id: int, payload: dict[str, object] | None = None) -> ActionResult:
+    """按计划登记的适用范围重算运行计划并推进状态；历史快照保持不变。"""
+    outcome, message = service.recalculate(entry_id)
+    if outcome is None:
+        return ActionResult(ok=False, message=message)
+    return ActionResult(ok=True, message=message, entry=outcome)
+
+
+@router.post("/{entry_id}/archive", response_model=ActionResult)
+def archive(entry_id: int) -> ActionResult:
+    """归档只发生在已完成或已暂停的计划上。"""
+    entry, message = service.archive(entry_id)
+    if entry is None:
+        return ActionResult(ok=False, message=message)
+    return ActionResult(ok=True, message=message, entry=entry)
+
+
+@router.post("/{entry_id}/restore", response_model=ActionResult)
+def restore(entry_id: int) -> ActionResult:
+    """从归档恢复只针对已暂停的计划。"""
+    entry, message = service.restore(entry_id)
+    if entry is None:
+        return ActionResult(ok=False, message=message)
+    return ActionResult(ok=True, message=message, entry=entry)
+
+
+@router.post("/{entry_id}/complete", response_model=ActionResult)
+def complete(entry_id: int) -> ActionResult:
+    """运行中的计划完成一次调度后进入已完成。"""
+    entry, message = service.complete(entry_id)
+    if entry is None:
+        return ActionResult(ok=False, message=message)
+    return ActionResult(ok=True, message=message, entry=entry)
+
+
+@router.post("/{entry_id}/batches", response_model=ActionResult)
+def generate_batch(entry_id: int) -> ActionResult:
+    """产出运行批次；没有依赖完成依据时拒绝，同一计划同一分区只产出一次。"""
+    outcome, message = service.generate_batch(entry_id)
+    if outcome is None:
+        return ActionResult(ok=False, message=message)
+    return ActionResult(ok=True, message=message, entry=outcome)
+
+
+@router.post("/receipts", response_model=ActionResult)
+def report_receipt(payload: dict[str, object]) -> ActionResult:
+    """登记依赖任务结果；登记后按适用范围重算引用该任务的所有计划。"""
+    detail, message = service.report_receipt(payload)
+    if detail is None:
+        return ActionResult(ok=False, message=message)
+    return ActionResult(ok=True, message=message, entry=detail)

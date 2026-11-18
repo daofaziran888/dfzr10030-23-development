@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 from typing import Any
 
+from app.services import dependency
 from app.store import store
 
 MODULE = "robot_task"
@@ -54,7 +55,11 @@ class RobotTaskService:
         if action not in ACTION_RULES:
             return None, f"动作「{action}」不属于RPA任务编排可执行范围"
         target = ACTION_RULES[action]
+        previous = str(entry.get("status") or "")
         entry["status"] = target
         entry["pending"] = target != STATUS_ORDER[-1]
         entry["abnormal"] = action in NEGATIVE_ACTIONS
+        # 任务状态是依赖完成状态的一个来源：状态变化后重算引用它的调度计划。
+        if previous != target:
+            dependency.refresh_dependents(str(entry.get("任务编号") or ""))
         return entry, f"RPA任务已{action}"

@@ -6,13 +6,18 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.seed import SEED_ROWS
+from app.seed import SEED_AUX, SEED_ROWS
 
 
 class Store:
     def __init__(self) -> None:
         self._tables: dict[str, list[dict[str, Any]]] = {
             name: [dict(row) for row in rows] for name, rows in SEED_ROWS.items()
+        }
+        # 附属表（运行计划快照、等待清单、依赖回执、工作台项）不属于导航模块，
+        # 单独存放，避免污染概览里的业务模块统计。
+        self._aux: dict[str, list[dict[str, Any]]] = {
+            name: [dict(row) for row in rows] for name, rows in SEED_AUX.items()
         }
 
     def module_names(self) -> list[str]:
@@ -26,6 +31,19 @@ class Store:
             if int(row.get("id", 0)) == entry_id:
                 return row
         return None
+
+    def aux_rows(self, module: str) -> list[dict[str, Any]]:
+        """附属表读写：不参与模块导航与概览统计。"""
+        return self._aux.setdefault(module, [])
+    def aux_find(self, module: str, entry_id: int) -> dict[str, Any] | None:
+        for row in self.aux_rows(module):
+            if int(row.get("id", 0)) == entry_id:
+                return row
+        return None
+
+    @staticmethod
+    def next_id(rows: list[dict[str, Any]]) -> int:
+        return max((int(row.get("id", 0)) for row in rows), default=0) + 1
 
     def overview(self) -> dict[str, object]:
         modules: list[dict[str, object]] = []
